@@ -79,9 +79,9 @@ fn do_assets(args: AssetsArgs) -> Result<(), AssetsError> {
     pnpm!("install")?;
 
     if args.watch {
-        do_assets_watch(root, asset_root, asset_index)?;
+        do_assets_watch(&root, &asset_root, &asset_index).context(WatchSnafu { asset_index })?;
     } else {
-        do_assets_once(root, asset_root, asset_index)?;
+        do_assets_once(&root, &asset_root, &asset_index).context(OnceSnafu { asset_index })?;
     }
 
     Ok(())
@@ -97,23 +97,28 @@ enum AssetsError {
     #[snafu(context(false))]
     PnpmInstall { source: PnpmError },
 
-    #[snafu(transparent)]
-    Watch { source: AssetsWatchError },
+    #[snafu(display("Could not extract the assets from {}", asset_index.display()))]
+    Watch {
+        source: AssetsWatchError,
+        asset_index: PathBuf,
+    },
 
-    #[snafu(transparent)]
-    Once { source: AssetsOnceError },
+    #[snafu(display("Could not extract the assets from {}", asset_index.display()))]
+    Once {
+        source: AssetsOnceError,
+        asset_index: PathBuf,
+    },
 }
 
 fn do_assets_watch(
-    root: PathBuf,
-    asset_root: PathBuf,
-    asset_index: PathBuf,
+    root: &Path,
+    asset_root: &Path,
+    asset_index: &Path,
 ) -> Result<(), AssetsWatchError> {
     use assets_watch_error::*;
 
     // The directory needs to exist before we can watch it.
-    std::fs::create_dir_all(&asset_root)
-        .context(AssetDirectoryCreateSnafu { path: &asset_root })?;
+    std::fs::create_dir_all(asset_root).context(AssetDirectoryCreateSnafu { path: asset_root })?;
 
     let (tx, rx) = mpsc::channel();
 
@@ -127,20 +132,45 @@ fn do_assets_watch(
     .context(WatcherCreateSnafu)?;
 
     watcher
-        .watch(&asset_root, RecursiveMode::NonRecursive)
+        .watch(asset_root, RecursiveMode::NonRecursive)
         .context(WatcherWatchSnafu)?;
 
-    // Debounce notifications
-    thread::spawn(move || -> Result<(), AssetsWatchError> {
-        loop {
+    let rust_file_thread = thread::spawn({
+        let root = root.to_owned();
+        let asset_root = asset_root.to_owned();
+        let asset_index = asset_index.to_owned();
+
+        move || loop {
             recv_debounced(&rx)?;
             rebuild_asset_file(&root, &asset_root, &asset_index)?;
         }
     });
 
-    pnpm!("watch")?;
+    let pnpm_thread = thread::spawn(|| {
+        pnpm!("watch")?;
+        Ok(())
+    });
 
-    Ok(())
+    // Wait for the first thread to exit. Ah, to have the comforts
+    // of async...
+    let mut threads = [Some(rust_file_thread), Some(pnpm_thread)];
+
+    loop {
+        for thread_slot in &mut threads {
+            if let Some(t) = thread_slot.take() {
+                if dbg!(t.is_finished()) {
+                    return match t.join() {
+                        Ok(Ok(())) => ThreadExitSnafu.fail(),
+                        Ok(e) => e,
+                        Err(e) => std::panic::resume_unwind(e),
+                    };
+                }
+                *thread_slot = Some(t);
+            }
+        }
+
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -165,6 +195,9 @@ enum AssetsWatchError {
     #[snafu(display("Could not watch assets"))]
     #[snafu(context(false))]
     PnpmWatch { source: PnpmError },
+
+    #[snafu(display("Thread exited"))]
+    ThreadExit,
 }
 
 fn is_asset_file(p: &Path) -> Option<bool> {
@@ -202,12 +235,12 @@ fn recv_debounced(rx: &mpsc::Receiver<()>) -> Result<(), mpsc::RecvError> {
 }
 
 fn do_assets_once(
-    root: PathBuf,
-    asset_root: PathBuf,
-    asset_index: PathBuf,
+    root: &Path,
+    asset_root: &Path,
+    asset_index: &Path,
 ) -> Result<(), AssetsOnceError> {
     pnpm!("build")?;
-    rebuild_asset_file(&root, &asset_root, &asset_index)?;
+    rebuild_asset_file(root, asset_root, asset_index)?;
 
     Ok(())
 }
