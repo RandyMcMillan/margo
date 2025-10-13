@@ -266,14 +266,18 @@ fn rebuild_asset_file(
     let entry =
         fs::read_to_string(asset_index).context(ReadEntrypointSnafu { path: asset_index })?;
 
-    let (css_name, css, css_map) = extract_asset(&entry, asset_root, {
-        r#"href="assets/(ui.[a-zA-Z0-9]+.css)""#
-    })
+    let (css_name, css, css_map) = extract_asset(
+        &entry,
+        asset_root,
+        r#"href=(?:")?assets/(ui.[a-zA-Z0-9]+.css)"#,
+    )
     .context(ExtractCssSnafu)?;
 
-    let (js_name, js, js_map) = extract_asset(&entry, asset_root, {
-        r#"src="assets/(ui.[a-zA-Z0-9]+.js)""#
-    })
+    let (js_name, js, js_map) = extract_asset(
+        &entry,
+        asset_root,
+        r#"src=(?:")?assets/(ui.[a-zA-Z0-9]+.js)"#,
+    )
     .context(ExtractJsSnafu)?;
 
     let html_dir = join!(root, "src", "html");
